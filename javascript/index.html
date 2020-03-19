@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Cache-Control" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta http-equiv="Content-Script-Type" content="text/javascript" />
+<meta http-equiv="Content-Style-Type" content="text/css" />
+<script type="module">
+
+    /**
+     * CSV解析クラス。
+     * 
+     * 囲み文字が有る場合と、無い場合の両方に対応したCSVの解析処理。
+     * 例えば、以下のように囲み文字の有り無しが混在している場合でも、解析が可能。
+     * "フィールドA",フィールドB
+     * .
+     * .
+     * .
+     * 
+     * 使用例）
+     * let cp = new CSVParser(',', '"');
+     * let ret = cp.parse("...");
+     * ...
+     */
+    class CSVParser {
+
+        /**
+         * コンストラクタ。
+         * @param {String} delimiterChar デリミタ文字（1文字であること）
+         * @param {String} encloseChar 囲み文字（1文字であること）
+         */
+        constructor(delimiterChar, encloseChar) {
+
+            // 引数チェック
+            if (!(typeof delimiterChar === 'string' && delimiterChar.length === 1)) {
+                throw `CSVParser#constructor Assert error, delimiterChar: ${delimiterChar}`;
+            }
+            if (!(typeof encloseChar === 'string' && encloseChar.length === 1)) {
+                throw `CSVParser#constructor Assert error, encloseChar: ${encloseChar}`;
+            }
+
+            // -------------------------
+            // フィールド定義
+            // -------------------------
+            this.delimiterChar = delimiterChar;
+            this.encloseChar = encloseChar;
+
+            // 正規表現について
+            // regExpParseFieldWithEnclose … 囲み文字が有る場合の1フィールド抽出用正規表現
+            // regExpParseField            … 囲み文字が無い場合の1フィールド抽出用正規表現
+            // regExpEncloseEscape         … 囲み文字自体の文字
+            // 
+            // ※RegExpのフラグについて
+            //   s … 囲み文字有の場合、1フィールド内に改行文字が含まれている場合はそちらも抽出したいのでsを適用する
+            //   g … 1フィールドを繰り返し抽出するので、gオプションは不要
+            this.regExpParseFieldWithEnclose = new RegExp(`${encloseChar}(([^"]|"")*?)${encloseChar}(${delimiterChar}|(?=[\r\n])|$)`, 's');
+            this.regExpParseField            = new RegExp(`(.*?)(${delimiterChar}|(?=[\r\n])|$)`, '');
+            this.regExpEncloseEscape         = new RegExp(`${encloseChar}${encloseChar}`, `g`);
+        }
+
+        /**
+         * 解析処理。
+         * @param {String} text テキスト
+         * @returns {Array} 解析結果のレコードリスト
+         */
+        parse(text) {
+
+            // 引数チェック
+            if (!(typeof text === 'string')) {
+                throw `CSVParser#parse Assert error, text: ${text}`;
+            }
+
+            // 戻り値
+            let recordList = [];
+            let record = [];
+
+            // 検索用テキスト
+            let targetText = text;
+            // テキストの長さを取得
+            const textLen = text.length;
+
+            // 正規表現一致結果
+            let matchResult = null;
+
+            // テキストの終端まで繰り返し実行
+            let textIndex = 0;
+            while (textIndex < textLen) {
+
+                // ※String#charAtはインデックス位置がオーバーしていても空文字を返却するので
+                // 　インデックスオーバーチェックなどは不要
+                const currentChar = text.charAt(textIndex);     // 現在の文字
+                const prevChar    = text.charAt(textIndex - 1); // 直前の文字
+                const nextChar    = text.charAt(textIndex + 1); // 直後の文字
+
+                // 改行文字
+                if (currentChar === '\r' || 
+                    currentChar === '\n') {
+                    // 改行を発見したので行の終端と認識する
+
+                    if (prevChar === this.delimiterChar) {
+                        // 直前がデリミタなら空のデータを追加
+                        // "aaa,\nbbb" のように "aaa,"の後の位置で"\nbbb"より前の位置を想定。
+                        // 行内の最終フィールドが空欄で直後に改行があるような場合
+                        record.push('');
+                    }
+
+                    // レコードリストに行情報を追加して、行情報を新たに初期化する
+                    recordList.push(record);
+                    record = [];
+
+                    if (currentChar === '\r' && nextChar === '\n') {
+                        // CRLFの場合
+                        textIndex += 2;
+                    } else {
+                        // CR or LFの場合
+                        textIndex += 1;
+                    }
+
+                    // 次の行を処理する
+                    continue;
+                }
+
+                // RegExpでは検索開始の位置インデックスを設定する術がないため、substringして部分文字列を抽出する
+                // ※RegExp#lastIndexはgオプションでは使用可能だが、それ以外は無効なので、lastIndexは使用できない
+                targetText = text.substring(textIndex);
+
+                if (currentChar === this.encloseChar) {
+                    // 囲み文字で始まる場合 例）"あいうえお"
+
+                    matchResult = this.regExpParseFieldWithEnclose.exec(targetText);
+                    if (matchResult !== null) {
+                        // matchResult 0 … 検索文字全体
+                        // matchResult 1 … キャプチャ
+                        record.push(matchResult[1].replace(this.regExpEncloseEscape, this.encloseChar)); // 囲み文字が2文字連続する場合は、エスケープなので1つに置き換える
+                        textIndex += matchResult[0].length;
+                        // 次のフィールドを処理する
+                        continue;
+                    }
+                } else {
+                    // 囲み文字で始まらない 例）あいうえお
+
+                    matchResult = this.regExpParseField.exec(targetText);
+                    if (matchResult !== null) {
+                        // matchResult 0 … 検索文字全体
+                        // matchResult 1 … キャプチャ
+                        record.push(matchResult[1]);
+                        textIndex += matchResult[0].length;
+                        // 次のフィールドを処理する
+                        continue;
+                    }
+                }
+
+                // マッチなし
+                textIndex++;
+            }
+
+            const prevChar = text.charAt(textIndex - 1); // 直前の文字
+            if (prevChar === this.delimiterChar) {
+                // 直前がデリミタなら空のデータを追加
+                // "aaa,\nbbb" のように "aaa,"の後の位置で"\nbbb"より前の位置を想定。
+                // 行内の最終フィールドが空欄で直後に改行があるような場合
+                record.push('');
+            }
+
+
+            if (recordList.length <= 0) {
+                recordList.push(record);
+            } else {
+                if (record !== recordList[recordList.length - 1]) {
+                    // 末尾のレコードとresultRecがオブジェクト参照的に異なる場合は、resultRecが未追加なので追加する
+                    recordList.push(record);
+                }                
+            }
+
+            return recordList;
+        }
+    }
+
+    /**
+     * ロードイベント
+     */
+    window.addEventListener("load", function() {
+
+        test();
+    });
+
+    /**
+     * 実行ボタンのイベント
+     */
+    const execButton = document.getElementById("exec");
+    execButton.addEventListener("click", function() {
+
+        
+        const delimiterEle = document.getElementById("delimiter");
+        const encloseEle = document.getElementById("enclose");
+
+        const contentEle = document.getElementById("content");
+
+        const csvParser = new CSVParser(delimiterEle.value === '' ? '\t' : delimiterEle.value, encloseEle.value);
+        const recordList = csvParser.parse(contentEle.value);
+
+        const parseResultEle = document.getElementById("parseResult");
+        parseResultEle.value = JSON.stringify(recordList, null , "    ")
+    });
+
+    // ------------------------------------------------------------- testコード
+
+    /**
+     * Assertエラー
+     */
+    function assert(isSuccess) {
+
+        if (!isSuccess) {
+            debugger
+            throw `Assert error`;
+        }
+
+    }
+
+    /**
+     * テスト
+     */
+    function test() {
+
+        let csvParser = null;
+        let recordList = null;
+
+        // -----------------------------------------
+        // 引数チェック
+        // -----------------------------------------
+        try {
+            csvParser = new CSVParser(null, '"');
+            assert(false);
+        } catch (error) {
+        }
+
+        try {
+            csvParser = new CSVParser(',', null);
+            assert(false);
+        } catch (error) {
+        }
+
+        try {
+            csvParser = new CSVParser(',,', '"');
+            assert(false);
+        } catch (error) {
+        }
+
+        try {
+            csvParser = new CSVParser(',', '""');
+            assert(false);
+        } catch (error) {
+        }
+
+        try {
+            csvParser = new CSVParser(',', '"');
+            csvParser.parse(null);
+            assert(false);
+        } catch (error) {
+        }
+        // -----------------------------------------
+
+        csvParser = new CSVParser(',', '"');
+
+        // ---------------- 空文字列
+        recordList = csvParser.parse('');
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 0);
+
+        // ---------------- 1フィールド
+        recordList = csvParser.parse('abcdefgあいうえお!_');
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'abcdefgあいうえお!_');
+
+        // ---------------- 2フィールド
+        recordList = csvParser.parse('abcdefgあいうえお!_,かきくけこ');
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 2);
+        assert(recordList[0][0] === 'abcdefgあいうえお!_');
+        assert(recordList[0][1] === 'かきくけこ');
+
+        // ---------------- 先頭と中間と末尾が空のフィールド
+        recordList = csvParser.parse(',,');
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 3);
+        assert(recordList[0][0] === '');
+        assert(recordList[0][1] === '');
+        assert(recordList[0][2] === '');
+
+        // ---------------- 末尾が空のフィールド
+        recordList = csvParser.parse('abcdefgあいうえお!_,');
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 2);
+        assert(recordList[0][0] === 'abcdefgあいうえお!_');
+        assert(recordList[0][1] === '');
+
+        // ---------------- 先頭が空のフィールド
+        recordList = csvParser.parse(',abcdefgあいうえお!_');
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 2);
+        assert(recordList[0][0] === '');
+        assert(recordList[0][1] === 'abcdefgあいうえお!_');
+
+        // ---------------- 真ん中が空のフィールド
+        recordList = csvParser.parse('abcdefgあいうえお!_,,かきくけこ');
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 3);
+        assert(recordList[0][0] === 'abcdefgあいうえお!_');
+        assert(recordList[0][1] === '');
+        assert(recordList[0][2] === 'かきくけこ');
+
+        // ---------------- 先頭行が空のフィールド
+        recordList = csvParser.parse(`\nあいうえお`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 0);
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'あいうえお');
+
+        // ---------------- 2行目が空のフィールド
+        recordList = csvParser.parse(`あいうえお\n`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あいうえお');
+        assert(recordList[1].length === 0);
+
+        // ---------------- 1行目と3行目が空のフィールド
+        recordList = csvParser.parse(`\nあいうえお\n`);
+        assert(recordList.length === 3);
+        assert(recordList[0].length === 0);
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'あいうえお');
+        assert(recordList[2].length === 0);
+
+        // ---------------- 各種改行文字やタブ文字を試してみる
+        recordList = csvParser.parse(`あいうえお\r\nかきくけこ\nさしすせそ\rたちつてと\tタブ`);
+        assert(recordList.length === 4);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あいうえお');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'かきくけこ');
+        assert(recordList[2].length === 1);
+        assert(recordList[2][0] === 'さしすせそ');
+        assert(recordList[3].length === 1);
+        assert(recordList[3][0] === 'たちつてと\tタブ');
+
+        // ---------------- 改行文字を連続させる
+        recordList = csvParser.parse(`\r\n\r\n\n\r`);
+        assert(recordList.length === 5);
+        assert(recordList[0].length === 0);
+        assert(recordList[1].length === 0);
+        assert(recordList[2].length === 0);
+        assert(recordList[3].length === 0);
+        assert(recordList[4].length === 0);
+
+        // ---------------- 囲みなし 末尾の文字（区切り文字、改行文字）
+        recordList = csvParser.parse(`あ,`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 2);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[0][1] === '');
+
+        recordList = csvParser.parse(`あ\r`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 0);
+
+        recordList = csvParser.parse(`あ\n`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 0);
+
+        recordList = csvParser.parse(`あ\rか`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'か');
+
+        recordList = csvParser.parse(`あ\nか`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'か');
+
+        recordList = csvParser.parse(`あ\r\nか`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'か');
+
+        // ---------------------------------------------------
+        // ---------------- ダブルクォート囲み 空文字列
+        recordList = csvParser.parse(`""`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === '');
+
+        // ---------------- ダブルクォート囲み 文字有
+        recordList = csvParser.parse(`"あいうえお"`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あいうえお');
+
+        // ---------------- ダブルクォート囲み ダブルクォートを文字として入れる
+        recordList = csvParser.parse(`""""`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === '"');
+
+        recordList = csvParser.parse(`"""あ"`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === '"あ');
+
+        recordList = csvParser.parse(`"あ"""`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ"');
+
+        recordList = csvParser.parse(`"あ"""`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ"');
+
+        recordList = csvParser.parse(`"あ""\nい"`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ"\nい');
+
+        // ---------------- ダブルクォート囲み 末尾の文字（区切り文字、改行文字）
+        recordList = csvParser.parse(`"あ",`);
+        assert(recordList.length === 1);
+        assert(recordList[0].length === 2);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[0][1] === '');
+
+        recordList = csvParser.parse(`"あ"\r`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 0);
+
+        recordList = csvParser.parse(`"あ"\n`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 0);
+
+        recordList = csvParser.parse(`"あ"\r"か"`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'か');
+
+        recordList = csvParser.parse(`"あ"\n"か"`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'か');
+
+        recordList = csvParser.parse(`"あ"\r\n"か"`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 1);
+        assert(recordList[0][0] === 'あ');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'か');
+
+        // ---------------- ダブルクォート囲み 複数フィールド・複数レコード
+        recordList = csvParser.parse(`"あいうえおabcd123!","かき\r\n\tくけこ"\r\n"さしすせそ"""`);
+        assert(recordList.length === 2);
+        assert(recordList[0].length === 2);
+        assert(recordList[0][0] === 'あいうえおabcd123!');
+        assert(recordList[0][1] === 'かき\r\n\tくけこ');
+        assert(recordList[1].length === 1);
+        assert(recordList[1][0] === 'さしすせそ"');
+
+    }
+
+</script>
+<title>CSV Parser</title>
+</head>
+<body style="padding: 8px;">
+
+    <h1 style="padding: 0; margin: 0;">CSV Parser</h1>
+
+    <div>
+        <p style="font-weight: bold; padding: 0; margin: 10px 0;">オプション</p>
+        区切文字：<input name="delimiter" id="delimiter" value="" placeholder="未入力時はタブ">
+        <br>
+        囲み文字：<input name="enclose" id="enclose" value='"' style="margin-top: 8px;">
+    </div>
+    <div>
+        <p style="font-weight: bold; padding: 0; margin: 10px 0;">直接入力</p>
+        <textarea name="content" id="content" cols="100" rows="20"></textarea>
+    </div>
+    <div>
+        <button type="button" id="exec"
+                style="padding: 5px; margin: 10px 0;">CSVの解析実行</button>
+    </div>
+    <div>
+        <p style="font-weight: bold; padding: 0; margin: 10px 0;">結果</p>
+        <textarea name="parseResult" id="parseResult" cols="100" rows="20" readonly></textarea>
+    </div>
+
+</body>
